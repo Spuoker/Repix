@@ -42,7 +42,8 @@ pub fn build(b: *std.Build) void {
         }
     };
 
-    // the page: template + core + font + pipeline + the core's thread
+    // One page from separate sources: shared interface engine, description,
+    // program, processing pipeline and its thread, core and font.
     const embed = b.addRunArtifact(host_tool.make(b, "embed", "src/tools/embed.zig"));
     embed.addFileArg(b.path("src/ui/template.html"));
     embed.addArtifactArg(core);
@@ -50,6 +51,9 @@ pub fn build(b: *std.Build) void {
     embed.addFileArg(b.path("src/ui/fonts/OFL-Tiny5.txt"));
     embed.addFileArg(b.path("src/ui/pipeline.js"));
     embed.addFileArg(b.path("src/ui/worker.js"));
+    embed.addFileArg(b.path("src/ui/engine.js"));
+    embed.addFileArg(b.path("src/ui/interface.js"));
+    embed.addFileArg(b.path("src/ui/repix.js"));
     const page = embed.addOutputFileArg("repix.html");
 
     // the program in the project root

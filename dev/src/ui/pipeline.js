@@ -22,7 +22,7 @@ export const GRID_STEP={min:1, max:40};
 export const KNOB_START={
   jitter:0, colorTolerance:2, noiseMultiple:2, cap:0, overlap:1.5,
   placeWidth:0.12, surroundWeight:1, agreement:2,
-  neighbourStrictness:0.5, maxDrift:0, maxPaints:0};
+  neighbourStrictness:0.5, maxDrift:0, neighbourDrift:0, maxPaints:0};
 export const AGREEMENT_SHARE_START=0.4;
 
 /* A cut-off cell at the edge is kept if at least this share of it remains.
@@ -99,6 +99,7 @@ export function beginPass1(E,img,w,h,gx,gy,k,share){
   f64(E,pgy,gy.length).set(gy);
   const out=alloc(E,nx*ny*4), broken=alloc(E,nx*ny), meas=alloc(E,8*16);
   E.setSurroundWeight(k.surroundWeight);
+  E.setDetails(k.details ? 1 : 0);      // details between cells: only on a grid not the picture's own
   E.setPlaceWidth(k.placeWidth);
   const code=E.pass1Begin(img,w,h,pgx,nx,pgy,ny,k.overlap,tolerance(k),agreement(k,share),out,broken,meas);
   return {code, nx, ny, out,
@@ -220,10 +221,16 @@ export function cellNoise(meas,jitter){
   return Math.max(0.2, jitter/Math.sqrt(Math.max(1,meas[3])));
 }
 /* STAGE 2 AUTOMATIC SETTINGS. The smallest paint is a share of all cells —
-   one sixtieth: 273 cells on a 128x128 icon, 640 on a 160x240 work; the gauge
-   is the median joint in lightness; cell noise as above. */
+   one 240th, at least 4: 68 cells on a 128x128 icon, 240 on a 320x180 work;
+   the gauge is the median joint in lightness; cell noise as above.
+   STAGE 2 LEANS TO KEEPING. A paint merged away here is gone for good — no
+   later stage can tell it out again — while a cluster too many is what
+   stage 3 is for. Measured (bench measure "cells of truth spots that went to
+   a neighbouring paint", 9 real works and 5 synthetic, step 4.7, JPEG 72):
+   one sixtieth lost 27% of single cells and 30% of 3-4 cell spots, one 240th
+   loses 20% and 17%, final paints +16%. */
 export function groupAdvice(nw,nh,joints,meas,jitter){
-  return {minPaint:Math.max(4,Math.round(nw*nh/60)),
+  return {minPaint:Math.max(4,Math.round(nw*nh/240)),
           gauge:+jointMedians(joints)[0].toFixed(1),
           cellNoise:+cellNoise(meas,jitter).toFixed(2)};
 }
@@ -318,7 +325,8 @@ export function mergeAdvice(nw,nh,spread){
       preview()   — the paints as they stand, for the eye only, drawn over
                     `shown` (nx*ny RGBA, or nothing);
       end()       — {paints, mS, mT, art, where, palette}.
-    k = {mergeGauge, neighbourStrictness, maxDrift, minPaintTotal, maxPaints}.
+    k = {mergeGauge, neighbourStrictness, maxDrift, neighbourDrift, minPaintTotal,
+    maxPaints}.
     The result is that of one whole call: the art, which paint each cluster
     went to, and the palette — color and cells of each paint. */
 export function beginPass3(E,label,nw,nh,cc,k,spread,shown){
@@ -333,6 +341,7 @@ export function beginPass3(E,label,nw,nh,cc,k,spread,shown){
   if(shown) view().set(shown); else view().fill(0);
   E.setNeighbourStrictness(k.neighbourStrictness);
   E.setMaxDrift(k.maxDrift);
+  E.setNeighbourDrift(k.neighbourDrift||0);
   const code=E.pass3Begin(pl,total,nw,nh,cc.count,pc,mS,mT,k.minPaintTotal,k.maxPaints,out,target);
   return {code,
     clusters:n=>E.pass3Clusters(n),

@@ -10,6 +10,8 @@ to edit.
 Nothing in it jumps or flickers: every button, panel and picture moves to
 its place by one law of motion — see [The engine](#the-engine).
 
+**Video:** [I removed every animation from my app. It's never been smoother (GTB Layout)](https://youtu.be/37cs8OTFdZg) — how the engine works, shown on Repix itself.
+
 **From the concept to the first release: nine days.**
 
 <img width="1920" height="1080" alt="Снимок экрана 2026-09-28 174003" src="https://github.com/user-attachments/assets/66da5780-752e-4f3a-9c04-9210fc2d1896" />
@@ -22,7 +24,7 @@ offer to install it as an app, on a phone too, and then it works offline.
 **From disk:** download `repix.html` and double-click it. That's it.
 
 Nothing to install, no server, no account, no internet. It is one page of
-about 750 KB with everything inside: the computing core (WebAssembly,
+about 825 KB with everything inside: the computing core (WebAssembly,
 ~126 KB) and the font. On Android, open the file right from the phone; an
 iPhone won't run a saved page, so use the web link there.
 
@@ -30,7 +32,9 @@ iPhone won't run a saved page, so use the web link there.
 
 Drop a picture onto the window, or press **Open**. Repix finds the grid by
 itself. If it gets it wrong, turn the knobs — the result follows at once. A
-knob's field takes maths too: type `12/3` or `(2+3)*4`. A PNG with a
+knob's field takes maths too: type `12/3` or `(2+3)*4`. When no knob gets the
+cell size right, press **By points** — a ruler: click two grid crossings on one
+row or column far apart, say how many cells it spans, and the cell size and origin follow. A PNG with a
 transparent background stays transparent, down to the saved result; its
 background becomes an empty paint that works as an eraser. **F11** gives a clean
 full screen, with no browser bar sliding over the buttons.
@@ -50,7 +54,9 @@ mouse, keys and fingers can do is listed in **Guide**, in the settings menu
 
 You don't have to think about saving your progress. Close the tab, reload,
 let the phone unload the page — Repix opens right where you left it, painting
-and undo history included. **Save** gives you the current result as a PNG.
+and undo history included. **Save** gives you the current result as a PNG,
+or the whole project — the picture, every knob, the painting and the history —
+as a .repix file or kept right in Repix; **Open** takes either back.
 
 And make it yours: **52 themes**, each with an idea behind it, kept by
 families — daylight ones, the old machines pixel art was born on, a bar with a
@@ -71,7 +77,8 @@ your hand:
    with one color each; the noise inside them averages out.
 3. **Merge** — clusters of the same color anywhere in the work become one
    paint. Size decides: the larger a paint across the work, the harder it
-   is to merge away: five hundred cells are the author's, five are a leftover.
+   is to merge away: five hundred cells are the author's, five that differ
+   only a little are a leftover.
 4. **Paint** — no more algorithms, your turn. Brush, fill and pipette finish
    what did not come together; paints can be copied from any picture, edited, added,
    deleted, and the unused ones cleaned out.
@@ -96,10 +103,84 @@ hand changes *what* goes into a cell, not what the cell looks like.
 - **A pixel is its color and how much of it is there.** Transparency is data,
   not a guess: a pixel that is not there has no voice in any color, whether a
   cell is there is decided by the rule that decides its color, and a paint
-  never merges with nothing.
+  never merges with nothing. The picture's own transparency noise is measured
+  first (a re-saved PNG leaves a little alpha all over its background): a cell
+  within that noise of nothing is wholly clear, one within it of whole is
+  wholly there, and a part made half there on purpose — glass, a shadow —
+  stays as it is.
 - **One live source per layer.** Not three variants to pick the best from.
 - A threshold tuned on one work means nothing: it is measured on a bench with
   known answers — and then checked by eye.
+
+## How the core works
+
+**One question at three scales.** No threshold in the core is a number picked
+by hand. Every decision asks the same thing — is this difference bigger than
+this picture's own noise? — and only the scale changes: one cell, its
+neighbours, the whole work. Each scale has its own yardstick, measured in the
+picture itself. And the smaller a group, the more it is forgiven: a few cells
+that differ only a little are a leftover, a few that stand out strongly stay.
+
+**The grid.** Pixel art was drawn cell by cell, so every edge between colors
+lies on a lattice: position = origin + k × step. The core collects every color
+transition once, with its strength, and scores candidate steps: each
+transition gets a phase — where it falls inside the step — and the phases are
+added up as arrows. Transitions that agree on one phase give a long sum,
+scattered ones cancel out. The true step and its fractions score high, its
+multiples do not, so the largest step that still scores high is taken. Then
+every line is pulled onto the real transition next to it and the lattice is
+fitted by least squares, three rounds. Steps may be fractional. When the
+transitions fit no lattice well (a photograph, heavy blur, a neural-net
+"pixel" image), the grid is marked uncertain.
+
+**Pass 1 — one cell.** The cell's pixels and a band past its border are taken.
+The middle pixel is the anchor; every pixel votes with a weight that falls with
+its distance from the anchor in color and from the middle in place. In the
+band a neighbour's piece of the same paint counts in full, a piece of another
+paint not at all, and the band's voice is capped at a share of the inside's
+(by default, as much as the inside). The cell's color is
+the weighted mean of four numbers — color times how much of it is there, and
+that amount. The yardstick is the tolerance: no less than 8-bit color can
+tell apart, a multiple of the noise measured inside this picture's cells, no
+more than the closest two different paints of the work. The pass measures the
+picture as it goes (noise, blur, how far paints stand apart), and the knobs'
+automatic values come from those measurements.
+On a grid marked uncertain (a photograph), a detail that fell between cells —
+a star off a cell's middle, heard by no cell — goes to the one cell its peak
+lies in, with the mean color of its body (not its glow, and not its brightest
+pixel). Its strength is measured from the cells' ground, the median of their
+pixels, so a star on the corner of four cells is seen alike by all four. It
+stands out beyond twice the tolerance, or beyond the noise of its place if that
+is higher — read from how neighbouring pixels of the ground differ, so a smooth
+glow is no noise and a busy texture is. It must be obvious — eight tolerances
+away, or a spot of at least a quarter of a cell — and never a crumb: at least a
+sixteenth of the cell, so one pixel does not paint a cell ten pixels wide. On real pixel art every detail holds a
+cell of its own,
+so there the rule is off: what lies between cells there is compression
+ringing.
+
+**Pass 2 — neighbours.** Neighbouring cells are joined into clusters. A
+difference of colors is split in two: lightness — the same paint, darker or
+lighter — and tone — another paint, each with its own threshold. A cell is
+compared with the mean of the group it would join, not with the last cell, so
+a paint cannot leak through a bridge of cells, and a group's range from
+darkest to lightest is kept in check too, so a ramp cannot slide through step
+by step. The yardstick is this picture's own: the median difference between
+its neighbouring cells, for lightness and for tone apart. A single cell is
+given a wide margin, a group as big as "min paint" one yardstick.
+
+**Pass 3 — the whole work.** Clusters are merged into paints across the whole
+work, wherever they lie, largest first: the large ones set the palette, the
+small ones join it. A cluster joins the closest paint if it is close enough.
+How close depends on weight — the cells of that very color over the whole
+work: threshold = max(1, √(min paint / weight) − 1) × the median difference
+between this work's cluster colors. "Drift from source" caps how far a color
+may move; with a paint limit, a newcomer to a full palette either joins its
+closest paint or makes the two most alike ones merge, whichever changes fewer
+cells by less.
+
+The source files say the same at the place where each rule is carried out
+(`src/core/`).
 
 ## The engine
 
@@ -109,13 +190,20 @@ own, living inside the same page: **GTB layout — Goal, Trigger, Band.**
 - **Goal.** Everything that moves goes to a goal: a button finding its new
   place, a panel rolling into one row, a scroll, a hint appearing, a theme
   color, the pictures' zoom. One law of motion for all of them: a mass on a
-  spring with a damper. A new goal on the way turns it and keeps its speed;
-  let go with speed, it glides and slows; pushed past an edge, it stretches
-  and springs back. Nothing is animated.
+  spring with a damper, speeding up and braking within limits. The speed is
+  one arrow: a new goal bends the path and keeps the speed; how fast it goes
+  is measured by the straight line to the goal. At full speed, farther than
+  its braking, it is put on the straight line where braking begins. Let go
+  with speed, it glides and slows; pushed past an edge, it stretches and
+  springs back. Nothing is animated.
 - **Trigger.** Work starts only on a change, and its consequence is worked
   out once, before anything is painted. When nothing changes, nothing runs.
   The engine watches the page itself: whatever is added, shown or hidden is
-  laid out and moved in by the same rules.
+  laid out and moved in by the same rules. What comes in stands first folded
+  behind its neighbour, as if it had been there, and moves into the new
+  layout with everyone; what goes out is a ghost — it gets its goal like
+  everyone but is counted by no one, the others ride through it, and it fades
+  on its way.
 - **Band.** The layout changes only at thresholds, and no threshold is
   written by hand. Widths are measured once; from them the engine works out
   the fold for any width and the band of widths where that fold holds.
@@ -129,7 +217,9 @@ own, living inside the same page: **GTB layout — Goal, Trigger, Band.**
 - **Descriptions and one standard.** Every object is a description; every
   argument has one standard in one table, and a description names only what
   differs. A new ability goes into the engine for everyone, never into one
-  window.
+  window. Every argument is declared once (on what it stands, what it needs,
+  its value); an unknown or misplaced one is refused on screen, and one tool
+  checks the whole configuration.
 - **Pixel style.** Sizes, gaps, frames and shadows are counted in grid
   pixels, and a grid pixel is a whole number of screen pixels, so edges stay
   sharp at 125% or on a phone. The font is a pixel font, the icons are drawn
@@ -146,7 +236,9 @@ zig build
 ```
 
 Needs only [Zig](https://ziglang.org) 0.16. It compiles the core to
-WebAssembly, embeds it with the font into the page and puts the result where it belongs:
+WebAssembly, then embeds the shared interface engine, Repix's interface
+description and program, the processing pipeline and worker, the core, font
+and resources into one page. It puts the result where it belongs:
 
 ```
 repix.html              the program, in the project root, kept in git
@@ -194,8 +286,11 @@ dev/                    everything else
       pass2.zig         pass 2: cells -> clusters
       pass3.zig         pass 3: clusters -> paints across the work, palette
     ui/
-      template.html     the live source of the page: the interface and the
-                        engine it runs on
+      template.html     page markup, styles and placeholders for the build
+      engine.js         the canonical shared GTB interface engine; other
+                        projects use and extend this same file, not a fork
+      interface.js      Repix's interface descriptions and engine arguments
+      repix.js          Repix's state, image processing, actions and startup
       pipeline.js       how the page drives the core, as pure functions; the
                         build puts it into the page, the tests import it
       worker.js         the core's own thread: the page sends it jobs and
@@ -206,11 +301,14 @@ dev/                    everything else
                         its own, the images it opens
       sw.js             keeps the site for work without the network
     tools/
-      embed.zig         puts the core, the font, its license, the pipeline and
-                        the core's thread into the page
+      embed.zig         assembles the one-file page from the interface sources,
+                        processing code, core, font and licenses
       icons.zig         the app icons of the site, made cell for cell from
                         the page's own small icon
       pack.zig          packs the release zip
+  tools/
+    check_args.py       runs the built page under `?check` and lists every
+                        argument the engine refuses (exit 0 - none, 1 - listed)
   tests/
     bench.html          the test bench, runs the core from the built page
     expected.json       recorded results for the regression test
@@ -229,6 +327,11 @@ python -m http.server 8000
 ```
 
 and open `http://localhost:8000/dev/tests/bench.html`.
+
+The interface's configuration is checked apart: `python dev/tools/check_args.py`
+opens the built page in a headless browser and lists every argument the engine
+refuses — unknown, not for that kind of object, without what it needs, or of
+the wrong form.
 
 - **Regression** needs nothing: five synthetic works, four steps, three kinds
   of damage. Every stage's result is compared with `expected.json`. When a

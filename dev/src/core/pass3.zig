@@ -70,6 +70,19 @@ export fn setMaxDrift(v: f64) void {
     MAX_DRIFT = if (v > 0) v else 0;
 }
 
+/// DRIFT FROM NEIGHBOURS — how much a border may grow, in color units. Barred
+/// from its neighbour's paint, a cluster used to go to any paint that fit, and
+/// a speck of brown appeared in the blue sky: a border the source never had.
+/// Now a paint fits only if, against every laid neighbour's paint, the
+/// difference is not bigger than it was in the source by more than this, for
+/// lightness and for tone apart. No paint fits — the cluster starts its own.
+/// 0 — no cap. The full palette (max paints) pours past it, as it pours past
+/// every threshold.
+var NEIGHBOUR_DRIFT: f64 = 0;
+export fn setNeighbourDrift(v: f64) void {
+    NEIGHBOUR_DRIFT = if (v > 0) v else 0;
+}
+
 var PAINTS: u32 = 0; // how many paints came out
 // Paint numbers in use, the absorbed ones included: when paints merge (max
 // paints), the living ones keep their numbers, with gaps below them.
@@ -109,7 +122,7 @@ export fn pass3(
 /// smallest — and ended (the cells painted). Between the parts the page may
 /// show the paints as they stand (pass3Preview). The result is that of one
 /// whole call.
-const NB = 8; // neighbours kept for each cluster
+const NB = 64; // neighbours kept for each cluster (was 8: a big cluster lost most of its neighbours)
 const Pass = struct {
     label: [*]const i32 = undefined,
     total: usize = 0,
@@ -226,7 +239,7 @@ export fn pass3Begin(
         }
     }
 
-    // NEIGHBOURS OF EACH CLUSTER — up to eight, sharing a side.
+    // NEIGHBOURS OF EACH CLUSTER — up to NB, sharing a side.
     const nb_a = memory.alloc(gg * NB * 4);
     const nnb_a = memory.alloc(gg * 4);
     if (nb_a == 0 or nnb_a == 0) return 0;
@@ -344,15 +357,58 @@ export fn pass3Clusters(count: u32) u32 {
             if (pY > MAX_DRIFT) pY = MAX_DRIFT;
             if (pT > MAX_DRIFT) pT = MAX_DRIFT;
         }
+        // THE BORDER WITH EACH LAID NEIGHBOUR, as it was in the source and the
+        // paint that neighbour stands in now: a paint for this cluster must not
+        // make that border grow by more than NEIGHBOUR_DRIFT.
+        var nb_n: usize = 0;
+        var nb_pr: [NB]f64 = undefined;
+        var nb_pg: [NB]f64 = undefined;
+        var nb_pb: [NB]f64 = undefined;
+        var nb_s0: [NB]f64 = undefined;
+        var nb_t0: [NB]f64 = undefined;
+        if (NEIGHBOUR_DRIFT > 0) {
+            var q4: usize = 0;
+            while (q4 < nnb[g]) : (q4 += 1) {
+                const sg = @as(usize, nbr[g * NB + q4]);
+                if (assigned[sg] != 1) continue;
+                var ks = @as(usize, target[sg]);
+                while (moved[ks] != @as(u32, @intCast(ks))) ks = @as(usize, moved[ks]);
+                const ws = pweight[ks];
+                if (ws <= 0) continue;
+                nb_pr[nb_n] = psum[ks * CH] / ws;
+                nb_pg[nb_n] = psum[ks * CH + 1] / ws;
+                nb_pb[nb_n] = psum[ks * CH + 2] / ws;
+                split(r, gc, b, @floatFromInt(color[sg * CH]), @floatFromInt(color[sg * CH + 1]),
+                    @floatFromInt(color[sg * CH + 2]), &nb_s0[nb_n], &nb_t0[nb_n]);
+                nb_n += 1;
+            }
+        }
         var best: usize = n_paints;
         var best_d: f64 = 1e30;
         var k: usize = 0;
         while (k < n_paints) : (k += 1) {
             const w = pweight[k];
+            if (w <= 0) continue; // absorbed into another paint
             var dS: f64 = 0;
             var dT: f64 = 0;
             split(r, gc, b, psum[k * CH] / w, psum[k * CH + 1] / w, psum[k * CH + 2] / w, &dS, &dT);
             const dA = dAlpha(al, psum[k * CH + 3] / w);
+            // the borders this paint would draw with the laid neighbours
+            if (nb_n > 0) {
+                var grows = false;
+                var q5: usize = 0;
+                while (q5 < nb_n) : (q5 += 1) {
+                    var s1: f64 = 0;
+                    var t1: f64 = 0;
+                    split(psum[k * CH] / w, psum[k * CH + 1] / w, psum[k * CH + 2] / w,
+                        nb_pr[q5], nb_pg[q5], nb_pb[q5], &s1, &t1);
+                    if (s1 - nb_s0[q5] > NEIGHBOUR_DRIFT or t1 - nb_t0[q5] > NEIGHBOUR_DRIFT) {
+                        grows = true;
+                        break;
+                    }
+                }
+                if (grows) continue;
+            }
             // a neighbouring paint is judged stricter: it is a border, not a copy
             var kf: f64 = 1;
             {

@@ -75,6 +75,20 @@ async function inParts(job, step, show){
   }
 }
 const fresh=()=>E.freeMemoryTo(imageTop);
+// The share of neighbouring pixels, right and below, that are exactly equal.
+function equalShare(){
+  const px=new Uint32Array(E.memory.buffer, img, imgW*imgH);
+  let same=0, all=0;
+  for(let y=0;y<imgH;y++){
+    const row=y*imgW;
+    for(let x=0;x<imgW;x++){
+      const v=px[row+x];
+      if(x+1<imgW){ all++; if(px[row+x+1]===v) same++; }
+      if(y+1<imgH){ all++; if(px[row+imgW+x]===v) same++; }
+    }
+  }
+  return all ? same/all : 0;
+}
 /* THE BORDERS of what a picture shows, counted here and not on the page: for
    every cell, whether the one to its right and the one below it are another
    (a — one number a cell: its color as shown, or its cluster, or its paint).
@@ -123,7 +137,19 @@ const JOBS={
     imageTop=E.memoryTop();
     return {value:true};
   },
-  grid(){ fresh(); return {value:{found:searchGrid(E,img,imgW,imgH)}}; },
+  // THE GRID — and a picture that is already one cell a pixel. Its cell is
+  // the pixel, and every step is a fraction-free multiple of it, so the
+  // search takes some larger one that fits badly. Such a picture tells itself
+  // apart: most neighbouring pixels are exactly equal, which no upscaling,
+  // no JPEG and no photograph leaves. When no step fits well (`doubt`, the
+  // page's line for an uncertain grid), that picture is taken at one pixel.
+  grid(d){
+    fresh();
+    let found=searchGrid(E,img,imgW,imgH);
+    if(d && d.doubt && (!found || found.coherence<d.doubt) && equalShare()>0.5)
+      found={step:1, ox:0, oy:0, coherence:1, onePixel:true};
+    return {value:{found}};
+  },
   advice(d){ fresh(); return {value:advice(E,d.step,d.meas)}; },
   // Stage 1: the rows done so far go out as RGBA strips.
   async pass1(d, job){

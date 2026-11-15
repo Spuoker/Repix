@@ -66,6 +66,16 @@ export fn setSurroundWeight(v: f64) void {
     OVERLAP_WEIGHT = v;
 }
 
+// DETAILS BETWEEN CELLS are looked for only where the grid is not the
+// picture's own (the page's "grid uncertain": a photograph, heavy blur). On
+// real pixel art every detail stands on a cell of its own; what lies between
+// cells there is the ringing of compression, and taking it made the art worse
+// on the bench (losses 0.98% -> 1.24%).
+var DETAILS: bool = false;
+export fn setDetails(v: u32) void {
+    DETAILS = v != 0;
+}
+
 // Scratch buffers, so nothing is allocated per cell.
 var color: [MAX_WINDOW * CH]f64 = undefined;
 var weight: [MAX_WINDOW]f64 = undefined;
@@ -383,6 +393,35 @@ fn median(n: usize) f64 {
     return med_buf[n / 2];
 }
 
+/// The same middle value as median(), found by selection, not by sorting:
+/// linear on average, where a sort of a big cell is quadratic. The order of
+/// med_buf is left scrambled.
+fn middle(n: usize) f64 {
+    if (n == 0) return 0;
+    const k = n / 2;
+    var lo: usize = 0;
+    var hi: usize = n - 1;
+    while (lo < hi) {
+        const pivot = med_buf[lo + (hi - lo) / 2];
+        var i = lo;
+        var j = hi;
+        while (i <= j) {
+            while (med_buf[i] < pivot) i += 1;
+            while (med_buf[j] > pivot) j -= 1;
+            if (i <= j) {
+                const t = med_buf[i];
+                med_buf[i] = med_buf[j];
+                med_buf[j] = t;
+                i += 1;
+                if (j == 0) break;
+                j -= 1;
+            }
+        }
+        if (k <= j) hi = j else if (k >= i) lo = i else break;
+    }
+    return med_buf[k];
+}
+
 // Overlap pixels are grouped by the neighbour cell they lie in, up to five
 // cells away, so each neighbour's piece is judged on its own.
 const MAX_SHIFT: i64 = 5;
@@ -425,8 +464,88 @@ const Pass = struct {
     meas: [*]f64 = undefined,
     rows: [*]f64 = undefined,
     next: usize = 0,
+    clearAt: f64 = 0,
+    wholeAt: f64 = 0,
 };
 var P: Pass = .{};
+
+/// The multiple of a picture's own noise that a difference must pass to be
+/// told apart from it — for color (the tolerance, see autoParams) and for how
+/// much of a cell is there alike. The only tuned number here.
+const NOISE_MULTIPLE: f64 = 2.0;
+
+/// HOW FAR FROM NOTHING, AND FROM WHOLE, THIS PICTURE'S NOISE REACHES. A
+/// picture's clear parts may not be exactly clear: a resampled or re-saved PNG
+/// leaves a little alpha all over its background, and a little missing from
+/// its figure. That noise is measured before the pass, cell by cell, by its
+/// own look: near an end, noise hugs it — its distance from the end is small
+/// and scattered (mean no more than twice its spread, and one unit). A cell
+/// that stands evenly apart from the end (glass, a shadow made half there on
+/// purpose) is no noise and is not counted; nor is a cell half covered, the
+/// edge of a figure. The level is the median over the cells that hug the end,
+/// and a cell nearer to the end than that level times NOISE_MULTIPLE — never
+/// less than the color tolerance — is taken as the end itself.
+fn alphaNoise(img: [*]const u8, W: u32, H: u32, gx: [*]const f64, nx: u32, gy: [*]const f64, ny: u32, tolerance: f64) void {
+    var hc = [_]u32{0} ** 128;
+    var hw = [_]u32{0} ** 128;
+    var nc: u32 = 0;
+    var nw: u32 = 0;
+    var j: usize = 0;
+    while (j < ny) : (j += 1) {
+        const y0 = @max(0, @as(i64, @intFromFloat(@ceil(gy[j]))));
+        const y1 = @min(@as(i64, @intCast(H)), @as(i64, @intFromFloat(@ceil(gy[j + 1]))));
+        var i: usize = 0;
+        while (i < nx) : (i += 1) {
+            const x0 = @max(0, @as(i64, @intFromFloat(@ceil(gx[i]))));
+            const x1 = @min(@as(i64, @intCast(W)), @as(i64, @intFromFloat(@ceil(gx[i + 1]))));
+            if (x1 <= x0 or y1 <= y0) continue;
+            var n: f64 = 0;
+            var s1: f64 = 0;
+            var s2: f64 = 0;
+            var lo: u8 = 255;
+            var hi: u8 = 0;
+            var y = y0;
+            while (y < y1) : (y += 1) {
+                var x = x0;
+                while (x < x1) : (x += 1) {
+                    const a = img[(@as(usize, @intCast(y)) * W + @as(usize, @intCast(x))) * CH + 3];
+                    const v = @as(f64, @floatFromInt(a));
+                    n += 1;
+                    s1 += v;
+                    s2 += v * v;
+                    if (a < lo) lo = a;
+                    if (a > hi) hi = a;
+                }
+            }
+            const mean = s1 / n;
+            const sd = @sqrt(@max(0, s2 / n - mean * mean));
+            if (hi < 128) { // near nothing: the distance is the alpha itself
+                if (mean <= 2 * sd + 1) {
+                    hc[@min(127, @as(usize, @intFromFloat(@round(mean))))] += 1;
+                    nc += 1;
+                }
+            } else if (lo > 127) { // near whole: the distance is what is missing
+                const d = 255 - mean;
+                if (d <= 2 * sd + 1) {
+                    hw[@min(127, @as(usize, @intFromFloat(@round(d))))] += 1;
+                    nw += 1;
+                }
+            }
+        }
+    }
+    P.clearAt = @max(tolerance, NOISE_MULTIPLE * medianOf(&hc, nc));
+    P.wholeAt = @max(tolerance, NOISE_MULTIPLE * medianOf(&hw, nw));
+}
+fn medianOf(h: *const [128]u32, n: u32) f64 {
+    if (n == 0) return 0;
+    var seen: u32 = 0;
+    var k: usize = 0;
+    while (k < 128) : (k += 1) {
+        seen += h[k];
+        if (2 * seen >= n) return @floatFromInt(k);
+    }
+    return 127;
+}
 
 /// Computes the art from EXPLICIT cell borders, in one call.
 /// gx — nx+1 vertical borders, gy — ny+1 horizontal borders. Usually an even
@@ -501,6 +620,7 @@ export fn pass1Begin(
     P = .{ .img = img, .W = W, .H = H, .gx = gx, .nx = nx, .gy = gy, .ny = ny,
         .overlap = overlap, .tolerance = tolerance, .agree = agree,
         .out = out, .broken = broken, .meas = meas, .rows = rows, .next = 0 };
+    alphaNoise(img, W, H, gx, nx, gy, ny, tolerance);
     return 1;
 }
 
@@ -629,6 +749,35 @@ export fn pass1Rows(count: u32) u32 {
             }
             var bit: u8 = 0;
             var anchor: [CH]f64 = .{ color[mid * CH], color[mid * CH + 1], color[mid * CH + 2], color[mid * CH + 3] };
+            // A NOISY CELL IS JUDGED BY ITS OWN NOISE. The tolerance is one for
+            // the whole picture; where a place is noisier than it — the grain
+            // of a photograph's sky — every pixel looks like a paint of its
+            // own: the middle pixel, a random speck, became the anchor, a gap
+            // of the noise split the cell in two, and the cell came out the
+            // color of one speck on an even ground. So the cell's own spread
+            // is read — the median distance of its pixels from their
+            // per-channel median, which a minority of another paint does not
+            // move — and where it is wider than the tolerance, the cell is
+            // judged by it, and the anchor is that median, not one pixel. On
+            // clean art the spread is below the tolerance, and nothing here
+            // changes anything.
+            var n2c = n2;
+            if (kn >= 4) {
+                var med0: [CH]f64 = undefined;
+                var ch0: usize = 0;
+                while (ch0 < CH) : (ch0 += 1) {
+                    var b0: usize = 0;
+                    while (b0 < kn) : (b0 += 1) med_buf[b0] = color[@as(usize, own[b0]) * CH + ch0];
+                    med0[ch0] = middle(kn);
+                }
+                var b1: usize = 0;
+                while (b1 < kn) : (b1 += 1) med_buf[b1] = toAnchor(@as(usize, own[b1]), &med0);
+                const spread2 = middle(kn); // squared: the order is the same
+                if (spread2 > n2) {
+                    n2c = spread2;
+                    anchor = med0;
+                }
+            }
             {
                 // THE MIDDLE PIXEL, UNLESS IT IS ALONE. The anchor stays the
                 // middle pixel, but if almost nothing in the cell backs it,
@@ -636,7 +785,7 @@ export fn pass1Rows(count: u32) u32 {
                 var backers: usize = 0;
                 var a2: usize = 0;
                 while (a2 < kn) : (a2 += 1) {
-                    if (dist2(&color, @as(usize, own[a2]), &color, mid) < n2) backers += 1;
+                    if (toAnchor(@as(usize, own[a2]), &anchor) < n2c) backers += 1; // the middle pixel, or a noisy cell's median
                 }
                 // A CELL IS ONE PAINT, NOT A MIX OF TWO. Where a paint border
                 // crosses the cell, compression leaves a strip of blurred
@@ -662,7 +811,7 @@ export fn pass1Rows(count: u32) u32 {
                         }
                     }
                     // splitting only makes sense when the ends differ by more than the tolerance
-                    if (dmax > 4 * n2) {
+                    if (dmax > 4 * n2c) {
                         const pa = @as(usize, own[da]);
                         const pb = @as(usize, own[db]);
                         var axis: [CH]f64 = undefined;
@@ -695,7 +844,7 @@ export fn pass1Rows(count: u32) u32 {
                             }
                         }
                         // the gap must be real: wider than the tolerance
-                        if (gap > @sqrt(n2)) {
+                        if (gap > @sqrt(n2c)) {
                             var n_low: usize = 0;
                             var n_high: usize = 0;
                             a2 = 0;
@@ -723,7 +872,7 @@ export fn pass1Rows(count: u32) u32 {
                                 }
                                 // the middle pixel landed on the losing side: the cell is broken
                                 const dt = toAnchor(mid, &anchor);
-                                if (dt > n2) bit = 1;
+                                if (dt > n2c) bit = 1;
                                 backers = kn; // the anchor is chosen, loneliness no longer matters
                             }
                         }
@@ -751,7 +900,7 @@ export fn pass1Rows(count: u32) u32 {
                         var b2: usize = 0;
                         while (b2 < kn) : (b2 += 1) {
                             if (b2 == a2) continue;
-                            if (dist2(&color, pa, &color, @as(usize, own[b2])) < n2) {
+                            if (dist2(&color, pa, &color, @as(usize, own[b2])) < n2c) {
                                 backed += 1;
                                 break;
                             }
@@ -779,12 +928,20 @@ export fn pass1Rows(count: u32) u32 {
             // the centre in place, the quieter. Color width — the tolerance,
             // place width — PLACE_WIDTH of the cell.
             const rs2 = sq((hx + hy) * PLACE_WIDTH);
+            // (the pixel farthest from the anchor is noted on the way: a
+            // detail between cells starts from it, see below)
+            var peak: usize = 0;
+            var peakD: f64 = -1;
             var q: usize = 0;
             while (q < kn) : (q += 1) {
                 const pq = own[q];
                 const dc = toAnchor(pq, &anchor);
+                if (dc > peakD) {
+                    peakD = dc;
+                    peak = pq;
+                }
                 const dr = offx[pq] * offx[pq] + offy[pq] * offy[pq];
-                const w = @exp(-dc / (2 * n2)) * @exp(-dr / (2 * rs2));
+                const w = @exp(-dc / (2 * n2c)) * @exp(-dr / (2 * rs2));
                 sx += color[pq * CH] * w;
                 sy += color[pq * CH + 1] * w;
                 sz += color[pq * CH + 2] * w;
@@ -802,6 +959,140 @@ export fn pass1Rows(count: u32) u32 {
             const cy0 = sy / total;
             const cz0 = sz / total;
             const ca0 = sa / total;
+
+            // A DETAIL BETWEEN CELLS. A star, a highlight, a spark that fell
+            // off the middle is heard by no cell: far from every anchor in
+            // place and in color, its voice is next to nothing in each cell
+            // it touches, and it is lost. So it is given to ONE cell — the one
+            // its peak (its strongest pixel) lies in — and the others leave
+            // it, with no talk between them: a detail has one peak.
+            //   Its pixels are the ones that STAND OUT: farther from the cell's
+            // ground (see below) than twice the tolerance — or, in a noisy
+            // place, than as much above that place's own noise, read from how
+            // neighbouring pixels differ (a star's glow is smooth and is not
+            // taken for noise; read from the spread around the ground instead,
+            // the glow hid the star) — and of one color with the peak.
+            //   A detail is OBVIOUS: either standing out four times as far as
+            // that bar, eight tolerances — a strong one, a star; a speck of
+            // noise two pixels wide stands at half of it — or a spot of at
+            // least a quarter of a cell.
+            // And never a crumb: at least a sixteenth of the cell, however
+            // strong (one pixel must not paint a cell ten pixels wide). And it
+            // is a detail, not a part of something larger: no bigger than four
+            // cells (a star with its glow across the corner of four), all of it
+            // within two cells around its peak. It may hold the middles of the
+            // cells around it: a star on a corner does, and each of those
+            // cells drops it as a lone middle pixel — so its peak's cell
+            // takes it anyway.
+            //   Its pixels are its body, not its glow: at least half as far
+            // from the ground as its peak. Its color is the mean of them, not
+            // the brightest one. On clean art a detail stands on its own cell
+            // and holds its middle: nothing here changes it.
+            var detail = false;
+            var dcol: [CH]f64 = .{ 0, 0, 0, 0 };
+            var bar: f64 = 4 * n2;
+            // Measured from the cell's GROUND — the median of its pixels, not
+            // its anchor: a star on the corner of four cells holds some of
+            // their middles, and a cell whose anchor sits on the star would
+            // not see it, while the others would leave it to that cell. The
+            // ground is the same for all four (the star is the few), so all
+            // four find the same peak.
+            var ground: [CH]f64 = anchor;
+            var loud = DETAILS and peakD > bar;
+            if (loud) {
+                var ch3: usize = 0;
+                while (ch3 < CH) : (ch3 += 1) {
+                    var b3: usize = 0;
+                    while (b3 < kn) : (b3 += 1) med_buf[b3] = color[@as(usize, own[b3]) * CH + ch3];
+                    ground[ch3] = median(kn);
+                }
+                peakD = -1;
+                var a3: usize = 0;
+                while (a3 < kn) : (a3 += 1) {
+                    const pq = @as(usize, own[a3]);
+                    const d3 = toAnchor(pq, &ground);
+                    med_buf[a3] = d3;
+                    if (d3 > peakD) {
+                        peakD = d3;
+                        peak = pq;
+                    }
+                }
+                // THE NOISINESS OF THE PLACE: how much neighbouring pixels of the
+                // cell's ground differ, their median — a glow is smooth and is
+                // no noise here, a busy texture is; the detail's own pixels and
+                // edges are left out. The bar is twice the tolerance, or
+                // as much above this place's own noise, whichever is higher.
+                var np: usize = 0;
+                var yy0 = @max(iy0, 0);
+                while (yy0 < @min(iy1, @as(i64, @intCast(H)))) : (yy0 += 1) {
+                    var xx0 = @max(ix0, 0);
+                    while (xx0 + 1 < @min(ix1, @as(i64, @intCast(W)))) : (xx0 += 1) {
+                        if (np >= med_buf.len) break;
+                        const s0 = (@as(usize, @intCast(yy0)) * @as(usize, @intCast(W)) + @as(usize, @intCast(xx0))) * CH;
+                        var dd: f64 = 0;
+                        var g0: f64 = 0;
+                        var g1: f64 = 0;
+                        var ch4: usize = 0;
+                        while (ch4 < CH) : (ch4 += 1) {
+                            const v0 = @as(f64, @floatFromInt(img[s0 + ch4]));
+                            const v1 = @as(f64, @floatFromInt(img[s0 + CH + ch4]));
+                            dd += sq(v0 - v1);
+                            g0 += sq(v0 - ground[ch4]);
+                            g1 += sq(v1 - ground[ch4]);
+                        }
+                        // only the ground's own pixels: the detail's edges are no noise
+                        if (g0 > bar or g1 > bar) continue;
+                        med_buf[np] = dd;
+                        np += 1;
+                    }
+                }
+                // neighbours differ by twice a pixel's own spread: 16 spreads = 8 such
+                if (np >= 4) bar = @max(bar, 8 * median(np));
+                if (peakD <= bar) loud = false;
+            }
+            if (loud) {
+                const ppx = @as(i64, @intFromFloat(@round(cx + offx[peak])));
+                const ppy = @as(i64, @intFromFloat(@round(cy + offy[peak])));
+                const R = @as(i64, @intFromFloat(@ceil(2 * @max(hx, hy))));
+                const pc: [CH]f64 = .{ color[peak * CH], color[peak * CH + 1], color[peak * CH + 2], color[peak * CH + 3] };
+                var owner = true;
+                var reached = false;
+                var cnt: f64 = 0;
+                var yy = ppy - R;
+                outer: while (yy <= ppy + R) : (yy += 1) {
+                    if (yy < 0 or yy >= @as(i64, @intCast(H))) continue;
+                    var xx = ppx - R;
+                    while (xx <= ppx + R) : (xx += 1) {
+                        if (xx < 0 or xx >= @as(i64, @intCast(W))) continue;
+                        const sidx = (@as(usize, @intCast(yy)) * @as(usize, @intCast(W)) + @as(usize, @intCast(xx))) * CH;
+                        var c: [CH]f64 = undefined;
+                        var ch: usize = 0;
+                        while (ch < CH) : (ch += 1) c[ch] = @floatFromInt(img[sidx + ch]);
+                        const toPeak = sq(c[0] - pc[0]) + sq(c[1] - pc[1]) + sq(c[2] - pc[2]) + sq(c[3] - pc[3]);
+                        const dA = sq(c[0] - ground[0]) + sq(c[1] - ground[1]) + sq(c[2] - ground[2]) + sq(c[3] - ground[3]);
+                        // does not stand out; or is its glow, less than half as far
+                        // from the ground as the peak; or is nearer the ground than the peak
+                        if (dA <= bar or dA < peakD / 4 or toPeak >= dA) continue;
+                        const inCell = (yy >= iy0 and yy < iy1 and xx >= ix0 and xx < ix1);
+                        // a stronger pixel of it outside: its peak is a neighbour's
+                        if (!inCell and (dA > peakD or (dA == peakD and (yy < ppy or (yy == ppy and xx < ppx))))) {
+                            owner = false;
+                            break :outer;
+                        }
+                        cnt += 1;
+                        ch = 0;
+                        while (ch < CH) : (ch += 1) dcol[ch] += c[ch];
+                        if (yy == ppy - R or yy == ppy + R or xx == ppx - R or xx == ppx + R) reached = true;
+                    }
+                }
+                const area = hx * hy;
+                const obvious = peakD > 16 * bar or cnt >= area / 4;
+                if (owner and !reached and obvious and cnt >= area / 16 and cnt <= 4 * area) {
+                    detail = true;
+                    var ch: usize = 0;
+                    while (ch < CH) : (ch += 1) dcol[ch] /= cnt;
+                }
+            }
 
             var rs: usize = 0;
             while (rs < NEIGHBOURS) : (rs += 1) {
@@ -859,9 +1150,30 @@ export fn pass1Rows(count: u32) u32 {
             // Straight color out of the premultiplied mean: divided by how
             // much of the cell is there. A cell wholly there is taken as it
             // is; a cell not there at all has no color.
-            const alpha = ita / itn;
+            // AS GOOD AS NOTHING, OR WHOLLY THERE: a cell whose four numbers
+            // stand nearer to nothing than the color tolerance, or whose
+            // amount stands within the picture's own noise of nothing
+            // (alphaNoise), is nothing — wholly clear and with no color (its
+            // faint color is noise, blown up by the division); a cell whose
+            // amount stands within that noise of whole is wholly there.
+            if (detail) {
+                itx = dcol[0] * itn;
+                ity = dcol[1] * itn;
+                itz = dcol[2] * itn;
+                ita = dcol[3] * itn;
+            }
+            const mean = ita / itn;
+            const clearR = itx / itn;
+            const clearG = ity / itn;
+            const clearB = itz / itn;
+            var alpha = mean;
+            if (mean <= P.clearAt or clearR * clearR + clearG * clearG + clearB * clearB + mean * mean <= n2) {
+                alpha = 0;
+            } else if (255.0 - mean <= P.wholeAt) {
+                alpha = 255;
+            }
             const A = roundByte(alpha);
-            const un: f64 = if (A == 255) 1.0 else if (A == 0) 0.0 else 255.0 / alpha;
+            const un: f64 = if (A == 0) 0.0 else if (roundByte(mean) == 255) 1.0 else 255.0 / mean;
             out[cell] = roundByte(itx / itn * un);
             out[cell + 1] = roundByte(ity / itn * un);
             out[cell + 2] = roundByte(itz / itn * un);
@@ -1315,7 +1627,7 @@ export fn autoParams(step: f64, meas: [*]const f64, out: [*]f64) void {
     const measured = meas[4] > 0;
 
     const FLOOR: f64 = 2.0; // 8-bit color
-    const MULTIPLE: f64 = 2.0; // our own noise, tuned by measurement
+    const MULTIPLE: f64 = NOISE_MULTIPLE; // our own noise, tuned by measurement
 
     out[0] = MULTIPLE;
     out[1] = 1.5; // overlap, as a share of the cell side

@@ -1,7 +1,20 @@
 # The engine
 
+The video walks through it on Repix itself: https://youtu.be/37cs8OTFdZg
+
 Repix is not built on a UI library. It runs on its own **framework-engine**,
-written for it and living in `src/ui/template.html`. Two halves, one file:
+written for it. The shared implementation is `src/ui/engine.js`; Repix's own
+interface descriptions are in `src/ui/interface.js`, and its program logic is
+in `src/ui/repix.js`. `src/ui/template.html` holds the page, styles and build
+placeholders. The build embeds all of them into the single `repix.html`.
+
+There is one canonical `engine.js`, kept in the Repix sources. Other projects
+use and extend that same file; their engine improvements are brought back into
+it rather than maintained as a divergent fork. This is not a separately
+released or supported engine package, and the finished page needs no runtime
+file beside it.
+
+Two halves, one model:
 
 - **The framework** says *how an object is written*. Every object is a
   **description** (built by `buildNode`); every argument of a description has
@@ -19,8 +32,19 @@ written for it and living in `src/ui/template.html`. Two halves, one file:
    itself, a bar pulls its scroll by a spring with play.
 2. **One law.** A mass on a spring with a damper (`STANDARD.follow`: `ms` —
    the pace, `stiff`, `damping`, `arrive`, `least` — the least speed,
-   `fastest`, `gather` — how fast speed is gathered). Place, a shelf's height,
+   `fastest`, `gather` — how fast speed is gathered, `brake` — how many times
+   faster it is shed). Place, a shelf's height,
    a scroll, opacity, a theme color, the pictures' view — all on this law.
+   It speeds up at most by `gather`, brakes at most `brake` times harder and
+   starts braking in time to stop on the goal; the spring alone settles the
+   last pixels and moves short paths. **In the plane the speed is one arrow**:
+   the law works on the distance to the goal (how fast it goes is measured by
+   the straight line to it), the speed across that line has no goal of its own
+   and is shed by braking, the whole arrow never above `fastest` — so a new
+   goal bends the path instead of turning the speed round. **At full speed the
+   way is not gone through**: a thing farther from its goal than its braking
+   is put on the straight line to the goal where braking would begin, at full
+   speed; from there the way is real.
    Something let go with speed **glides**: it loses a share of its speed each
    millisecond and ends where that takes it, never speeding up.
 3. **The standard is the engine's; an object differs by arguments.** A new
@@ -65,7 +89,9 @@ written for it and living in `src/ui/template.html`. Two halves, one file:
 | Part | What it does |
 |---|---|
 | `STANDARD` | every standard in one place: follow, scroll, stretch, line, appear/vanish, tint, view, grid, windowRest, barWidth, wordsKept, knob |
-| `approach` | one step of the law, in small sub-steps (stable at any pace) |
+| `approach` | one step of the law, in small sub-steps of at most 4 ms (stable at any pace) |
+| `approachPlane` | the law in the plane: on the distance to the goal, the speed one arrow, the leap at full speed |
+| ghosts (`goOut`, `behindPrev`, `ghostLayout`, `placeComing`) | what goes out and what comes in: a goal behind the neighbour before it, counted by no one |
 | channels (`channel`, `aim`) | a kind of motion is one record: `least`, `args`, `read`, `draw`, `done`; a value is a number or a list of numbers moved along its straight line; `glide` for a let-go |
 | `settle(touched)` | turns a change of the page into motion: asks where things stand only in the areas the change could reach (`whoIsAsked`), sets offsets from where things are drawn |
 | `smoothly(change)` | a named change: notes where the things that may go to another area (`wanders`) are drawn, makes the change, settles by the page's own records of it |
@@ -82,22 +108,38 @@ The layout: `even`, `clip`, `hug`, `fill`, `align` (`'start'`, `'end'`,
 `gives`); how it looks broken in rows or moved down is the engine's.
 Motion: `follow` (`false` — stands at once; `{ms, stiff, damping, lag, …}` — its
 own pace and leash; `{window:{ms}}` — its pace after the window), `fades`, `appear`,
-`vanish`, `wanders` (may be put into another area: it comes from exactly where it
+`vanish` (`{withWay:true}` — the fade tied to the way), `wanders` (may be put into another area: it comes from exactly where it
 was drawn). Place: `goal` (with `divides` — a line between two neighbours in a row is
 where the first of them ends, on its way too), `stick`, `rest` (takes the room the
 shelves leave; no shelf itself). Scroll: `scrolls` (`false` — never a
-scroll). Shelves: `slides`, `rolls`, `squeezes`, `ribbon`. Knobs: `knob`
-with its rule — `math`, `outside`, `multiple`, `round`, `forbid`.
+scroll). Shelves: `slides`, `rolls`, `squeezes`, `ribbon`, `strip`, `lodges`.
+Knobs: `knob` with its rule — `math`, `outside`, `multiple`, `round`, `forbid`.
+`background` — drawn where the layout puts it, never moved or asked.
+
+What a node is (one at most): `win` (a floating window), `areas` (areas with
+`divider` lines between them), `buttons` (a row of buttons, its `field`),
+`knob`. What it is made of: `tag`, `id_`, `cls`, `text` or `inner` (one),
+`onto`, `props`, `page`, `data`. A button (a node or a record of `BUTTONS`):
+an action — `click`, `choice` or `link` (one) — and `held`, `off`, `pressed`,
+`dims`, `needs`, `hint` (`always`), `calls`, `group`, `hollow`, `icon`,
+`label`, `paint`, `place`, `shorter`, `shown`, `still`, `value`. A window of a
+picture: `caption`, `canvas`, `label`, `picture` and `captionArgs` (its
+motion).
 
 Each argument is described where the engine carries it out; its standard is
-in `STANDARD`.
+in `STANDARD`; on what it stands, its category and what it needs are declared
+once in `ARG_SPEC` — that list is the full one.
 
 ## Working on it
 
-- **Edit `src/ui/template.html`**, never `repix.html` (it is built).
+- **Edit the sources, never `repix.html`** (it is built): shared behavior in
+  `src/ui/engine.js`, Repix descriptions in `src/ui/interface.js`, program
+  behavior in `src/ui/repix.js`, and markup or styles in `src/ui/template.html`.
   Build with `zig build` in `dev/`.
 - **A feature goes into the engine**, with a standard and an argument —
   then used everywhere it fits. Check every place that uses it, not one.
+  Bring improvements from other projects back into this same `engine.js`;
+  do not let project-specific forks grow apart.
 - **No per-frame work, no looking over the page.** Find the trigger; make the
   consequence one action. A threshold is a number worked out from measured
   data, never a band one pixel wide.
@@ -175,6 +217,46 @@ in `STANDARD`.
   is asked when a change comes into it (that first time it stands; from then
   on it moves). A thing that had a place and was put elsewhere is asked where
   it came to.
+- **What comes in stands first behind its neighbour.** A thing shown is first
+  placed as if it had been there all along: flat (a group in one row), right
+  after the neighbour before it in its flow — behind the divider that would
+  bound it, as far as the row reaches. Then, with everyone, it takes the
+  layout its coming turns to, by the same law as the rest, fading in on the
+  way. Only what stands in an area that is itself coming into view (a window
+  opening) has no way of its own.
+- **What goes out is a ghost.** A thing hidden leaves the layout at once — for
+  everything that asks it is hidden — and goes out itself, no copy. It gets its
+  goal like everyone, by the same rule as a thing coming in (flat, after the
+  neighbour before it), but it is counted by no one: the others take its room
+  and ride through it, the hand passes through it. It goes to that goal by the
+  same law and fades on the way; out, it is gone (shown again before that, it
+  comes back from where it is drawn, at the speed it has). Ghosts see each
+  other: a ghost's goal is after the goal of a ghost before it, never on it.
+  Its fade and its way are independent; `vanish:{withWay:true}` ties the fade
+  to how much of the way is left. A ghost rides with what holds it (its goal
+  is kept against its holder). A divider has no way of its own: it stands on
+  the border of its neighbours as they are drawn.
+- **A way is drawn on the screen.** A thing that is turned or scaled draws its
+  way in its own frame turned back, so the offset on the screen is the one the
+  law gave. A picture that only shows a state (the flip button's arrows) turns
+  itself, not the thing that moves.
+- **One rule of being seen, one point where layout is done.** Whether a thing
+  is seen is one test (`seen`), never a property read here and there; what
+  must follow a finished layout (the ghosts' goals) is registered in
+  `AFTER_LAYOUT` and run once, whichever way the layout was laid. A change that
+  would call itself back for ever is cut by `loopGuard` (40 waves a task).
+- **Every area is kept by the engine.** What changed in any area — a page of a
+  window shown, a list filled — has its even rows evened and its groups
+  divided before places are noted; the program only shows and hides. The
+  rooms of the fields are watched by the engine itself, and a turn the
+  window causes (side by side or stacked) stands at once (`turnedByWindow`).
+- **A bar is decided by where its box goes.** When a shelf or a floating
+  window starts on its way to a new size, whether it scrolls is asked at the
+  size it goes to; the bar comes at once and stays so the whole way.
+- **A scroll moved by another stands where it was put.** The page setting it
+  (`scrollAt`), or the browser cutting it to a smaller room, ends the way it
+  was on — its place and speed were of content that is gone, and it never
+  bounces on an edge for it.
 - **On its way a thing is not looked at.** Where it is drawn is data (its
   offset and the offsets of the areas it stands in), and so is its leash: the
   box it stands in at its place is noted when it is sent. Its content is read
@@ -195,3 +277,15 @@ in `STANDARD`.
   no animation frames and no `ResizeObserver`: call what they would call, in
   the order a real frame does (resize events → animation frames → layout →
   size observers → paint), or force real frames (a screenshot paints).
+- **The arguments are declared once; the refusals follow from them.** Each
+  argument is declared in `ARG_SPEC` (on what it stands, its category, what it
+  needs, its value, the arguments inside it - `SUB_SPEC`). From that alone: a
+  word no argument of that kind declares is refused; of one category at most
+  one (goal/stick, link/click/choice, text/inner); a kind (win, areas, buttons,
+  knob) narrows what may stand beside it; an argument without what it needs is
+  refused; a value of the wrong form is refused. Under `?check` every
+  description is watched while read: a word the engine reads that is not
+  declared is refused too, so the declaration cannot fall behind the code. A
+  refusal stops the building and is shown in a red band over the page; the
+  whole configuration at once: `python dev/tools/check_args.py` (exit 0 -
+  none, 1 - refusals listed). A new argument: one entry in `ARG_SPEC`, nothing else.
