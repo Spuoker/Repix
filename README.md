@@ -18,7 +18,7 @@ its place by one law of motion — see [The engine](#the-engine).
 
 ## Running it
 
-**In the browser:** open https://spuoker.github.io/repix/. The browser will
+**In the browser:** open https://spuoker.github.io/Repix/. The browser will
 offer to install it as an app, on a phone too, and then it works offline.
 
 **From disk:** download `repix.html` and double-click it. That's it.
